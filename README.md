@@ -31,13 +31,25 @@ cp .env.example .env
 
 Use `./run.sh logs` to follow output or `./run.sh check` to run validation.
 
-If Docker is missing on Ubuntu or Debian, `./run.sh` downloads and installs Docker Engine plus the Compose plugin from Docker's official installer. You can install the requirements without starting the bot using:
+If Docker is missing on Ubuntu or Debian, `./run.sh` downloads and installs Docker Engine plus the Compose plugin from Docker's official installer. You can install Docker and build the image with all application requirements without starting the bot using:
 
 ```bash
 ./run.sh install
 ```
 
-The installer requests `sudo` access and adds your account to the `docker` group. Log out and back in afterward to use Docker without `sudo`. On Windows or macOS, install [Docker Desktop](https://docs.docker.com/desktop/) manually.
+On Linux, the installer requests `sudo` access and adds your account to the `docker` group. Log out and back in afterward to use Docker without `sudo`. On macOS, install [Docker Desktop](https://docs.docker.com/desktop/) manually.
+
+### Windows
+
+Open the project in **Git Bash** and run the same launcher:
+
+```bash
+cp .env.example .env
+# Fill in .env, then run:
+./run.sh
+```
+
+If Docker is missing, the script downloads and installs Docker Desktop through `winget`, starts it, and waits for the container engine. Administrator approval may be required. The Docker build installs the Node.js packages and `yt-dlp` required by the bot, so no separate `npm install` is needed.
 
 ## Run directly
 

@@ -14,7 +14,7 @@ usage() {
     'Usage: ./run.sh [docker|install|local|check|logs]' \
     '' \
     '  docker  Build and start the bot with Docker (default)' \
-    '  install Install Docker Engine and Compose when missing' \
+    '  install Install Docker and application requirements' \
     '  local   Install missing npm packages and run with Node.js' \
     '  check   Run syntax checks and tests without starting the bot' \
     '  logs    Follow logs from the Docker container' \
@@ -23,6 +23,14 @@ usage() {
     '  ./run.sh' \
     '  ./run.sh local' \
     '  ./run.sh check'
+}
+
+# Return success when running from a Windows Bash environment.
+is_windows() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Return the privilege command needed for system package installation.
@@ -34,15 +42,25 @@ admin_command() {
   printf '%s' sudo
 }
 
-# Install Docker Engine and Compose from Docker's official convenience script.
-install_docker() {
-  if [[ "$(uname -s)" != "Linux" ]]; then
+# Install Docker Desktop on Windows using Microsoft's Windows Package Manager.
+install_docker_windows() {
+  if ! command -v winget.exe >/dev/null 2>&1; then
     printf '%s\n' \
-      'Automatic Docker installation is supported only on Linux.' \
-      'Install Docker Desktop from: https://docs.docker.com/desktop/' >&2
+      'Windows Package Manager (winget) is required to install Docker Desktop.' \
+      'Install App Installer from the Microsoft Store, then run this script again:' \
+      'https://apps.microsoft.com/detail/9nblggh4nns1' >&2
     exit 1
   fi
 
+  printf '%s\n' \
+    'Docker Desktop is missing. Downloading and installing it with winget...' \
+    'Windows may display an administrator approval prompt.'
+  winget.exe install --exact --id Docker.DockerDesktop \
+    --accept-package-agreements --accept-source-agreements
+}
+
+# Install Docker Engine and Compose from Docker's official convenience script.
+install_docker_linux() {
   if [[ ! -r /etc/os-release ]]; then
     printf '%s\n' 'Cannot identify this Linux distribution.' >&2
     exit 1
@@ -80,15 +98,85 @@ install_docker() {
   fi
 }
 
-# Ensure Docker and the Compose plugin exist, installing them when necessary.
-ensure_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    install_docker
+# Install the Docker distribution appropriate for this operating system.
+install_docker() {
+  if is_windows; then
+    install_docker_windows
+  elif [[ "$(uname -s)" == "Linux" ]]; then
+    install_docker_linux
+  else
+    printf '%s\n' \
+      'Automatic Docker installation is supported on Windows, Ubuntu, and Debian.' \
+      'Install Docker Desktop from: https://docs.docker.com/desktop/' >&2
+    exit 1
+  fi
+}
+
+# Locate Docker even when Windows has not refreshed Git Bash's PATH after install.
+set_docker_command() {
+  if command -v docker >/dev/null 2>&1; then
+    DOCKER_COMMAND=(docker)
+    return 0
   fi
 
-  if docker compose version >/dev/null 2>&1; then
-    DOCKER_COMMAND=(docker)
-  elif command -v sudo >/dev/null 2>&1 && sudo docker compose version >/dev/null 2>&1; then
+  if is_windows; then
+    local docker_desktop_cli='/c/Program Files/Docker/Docker/resources/bin/docker.exe'
+    if [[ -x "$docker_desktop_cli" ]]; then
+      DOCKER_COMMAND=("$docker_desktop_cli")
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Start Docker Desktop and wait until its Linux container engine is ready.
+start_docker_desktop() {
+  local docker_desktop='/c/Program Files/Docker/Docker/Docker Desktop.exe'
+  if [[ ! -f "$docker_desktop" ]]; then
+    printf '%s\n' \
+      'Docker Desktop was installed, but its executable could not be found.' \
+      'Start Docker Desktop manually, then run this script again.' >&2
+    exit 1
+  fi
+
+  printf '%s\n' 'Starting Docker Desktop and waiting for its engine...'
+  powershell.exe -NoProfile -NonInteractive -Command \
+    "Start-Process -FilePath 'C:\Program Files\Docker\Docker\Docker Desktop.exe'" >/dev/null
+
+  local attempt
+  for attempt in {1..90}; do
+    if "${DOCKER_COMMAND[@]}" info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  printf '%s\n' \
+    'Docker Desktop did not become ready within three minutes.' \
+    'Finish any setup shown in Docker Desktop, then run this script again.' >&2
+  exit 1
+}
+
+# Ensure Docker and the Compose plugin exist, installing them when necessary.
+ensure_docker() {
+  if ! set_docker_command; then
+    install_docker
+    if ! set_docker_command; then
+      printf '%s\n' \
+        'Docker was installed, but the command is not available yet.' \
+        'Open a new terminal and run this script again.' >&2
+      exit 1
+    fi
+  fi
+
+  if is_windows && ! "${DOCKER_COMMAND[@]}" info >/dev/null 2>&1; then
+    start_docker_desktop
+  fi
+
+  if "${DOCKER_COMMAND[@]}" compose version >/dev/null 2>&1; then
+    return 0
+  elif ! is_windows && command -v sudo >/dev/null 2>&1 && sudo docker compose version >/dev/null 2>&1; then
     DOCKER_COMMAND=(sudo docker)
   else
     printf '%s\n' 'Docker is installed, but the daemon or Compose plugin is unavailable.' >&2
@@ -122,6 +210,7 @@ validate_env() {
 run_docker() {
   validate_env
   ensure_docker
+  printf '%s\n' 'Building the image and installing application requirements...'
   "${DOCKER_COMMAND[@]}" compose up --build -d
   "${DOCKER_COMMAND[@]}" compose logs --tail=30
 }
@@ -143,6 +232,8 @@ case "${1:-docker}" in
   docker) run_docker ;;
   install)
     ensure_docker
+    printf '%s\n' 'Building the image and installing application requirements...'
+    "${DOCKER_COMMAND[@]}" compose build
     "${DOCKER_COMMAND[@]}" --version
     "${DOCKER_COMMAND[@]}" compose version
     ;;
