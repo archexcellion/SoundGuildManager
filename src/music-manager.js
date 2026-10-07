@@ -10,7 +10,8 @@ import {
   joinVoiceChannel,
 } from "@discordjs/voice";
 import ffmpegPath from "ffmpeg-static";
-import { nowPlayingView } from "./ui.js";
+import { UserError, friendlyError } from "./resolvers.js";
+import { nowPlayingView, trackFailedView } from "./ui.js";
 
 export class GuildPlayer {
   /** Create the queue, voice player, and process state for one Discord server. */
@@ -41,6 +42,38 @@ export class GuildPlayer {
     });
   }
 
+  /** Report whether a user paused playback (Discord's auto-pause resumes itself). */
+  get paused() {
+    return this.player.state.status === AudioPlayerStatus.Paused;
+  }
+
+  /** Report the voice channel the bot is connected to, if any. */
+  get channelId() {
+    return this.connection?.joinConfig.channelId || null;
+  }
+
+  /** Redraw the now-playing card so its controls and queue info stay current. */
+  refreshCard() {
+    if (!this.current || !this.nowPlayingMessage) return;
+    this.nowPlayingMessage
+      .edit(this.cardView())
+      .catch((error) => this.onError(error));
+  }
+
+  /** Build the now-playing card for the current state. */
+  cardView() {
+    return nowPlayingView(this.current, {
+      queue: this.queue,
+      paused: this.paused,
+    });
+  }
+
+  /** Remove the controls from the last now-playing card so it cannot be reused. */
+  retireCard() {
+    this.nowPlayingMessage?.edit({ components: [] }).catch(() => {});
+    this.nowPlayingMessage = null;
+  }
+
   /** Join or move to a voice channel and wait until Discord reports it ready. */
   async connect(channel) {
     clearTimeout(this.idleTimer);
@@ -63,7 +96,15 @@ export class GuildPlayer {
         this.stop();
       }
     });
-    await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
+    try {
+      await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
+    } catch {
+      this.connection?.destroy();
+      this.connection = null;
+      throw new UserError(
+        `I couldn’t connect to <#${channel.id}>. Check my permissions and try again.`,
+      );
+    }
   }
 
   /** Add resolved tracks and begin playback when the player is idle. */
@@ -72,18 +113,19 @@ export class GuildPlayer {
     clearTimeout(this.idleTimer);
     if (!this.current && this.player.state.status === AudioPlayerStatus.Idle)
       this.advance();
+    else this.refreshCard();
   }
 
   /** Stop the old stream, take the next track, and create its audio pipeline. */
   advance() {
     this.killProcesses();
     this.current = this.queue.shift() || null;
+    this.retireCard();
     if (!this.current) {
-      this.nowPlayingMessage?.edit({ components: [] }).catch(() => {});
-      this.nowPlayingMessage = null;
       this.scheduleDisconnect();
       return;
     }
+    const item = this.current;
 
     const downloader = spawn(
       this.ytdlpPath,
@@ -97,7 +139,7 @@ export class GuildPlayer {
         "-o",
         "-",
         "--",
-        this.current.url,
+        item.url,
       ],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
@@ -121,9 +163,19 @@ export class GuildPlayer {
     );
 
     downloader.stdout.pipe(ffmpeg.stdin);
-    downloader.stderr.on("data", (chunk) =>
-      this.onError(new Error(chunk.toString().trim())),
-    );
+    // Ignore EPIPE when FFmpeg is killed before yt-dlp finishes writing.
+    ffmpeg.stdin.on("error", () => {});
+    const stderr = [];
+    downloader.stderr.on("data", (chunk) => stderr.push(chunk));
+    downloader.once("close", (code) => {
+      // A null code means we killed it on skip/stop; only real failures count.
+      if (!code) return;
+      const detail = Buffer.concat(stderr).toString().trim();
+      this.onError(new Error(detail || `yt-dlp exited with code ${code}`));
+      this.textChannel
+        .send(trackFailedView(item, friendlyError(detail)))
+        .catch((error) => this.onError(error));
+    });
     downloader.once("error", (error) => this.onError(error));
     ffmpeg.once("error", (error) => this.onError(error));
     this.processes = [downloader, ffmpeg];
@@ -132,13 +184,14 @@ export class GuildPlayer {
       inputType: StreamType.Raw,
     });
     this.player.play(resource);
-    this.nowPlayingMessage?.edit({ components: [] }).catch(() => {});
     this.textChannel
-      .send(nowPlayingView(this.current, this.queue.length))
+      .send(this.cardView())
       .then((message) => {
-        this.nowPlayingMessage = message;
+        // The track may have ended while the card was still being sent.
+        if (this.current === item) this.nowPlayingMessage = message;
+        else message.edit({ components: [] }).catch(() => {});
       })
-      .catch(() => {});
+      .catch((error) => this.onError(error));
   }
 
   /** Pause the current Discord audio player, returning whether it changed state. */
@@ -164,8 +217,7 @@ export class GuildPlayer {
     this.killProcesses();
     this.connection?.destroy();
     this.connection = null;
-    this.nowPlayingMessage?.edit({ components: [] }).catch(() => {});
-    this.nowPlayingMessage = null;
+    this.retireCard();
     clearTimeout(this.idleTimer);
   }
 
@@ -195,13 +247,13 @@ export class MusicManager {
     this.guilds = new Map();
   }
 
-  /** Return a server's player, creating it and updating its response channel. */
+  /** Return a server's player, creating it and updating its response channel when given. */
   get(guild, textChannel) {
     let state = this.guilds.get(guild.id);
     if (!state) {
       state = new GuildPlayer({ ...this.options, guild, textChannel });
       this.guilds.set(guild.id, state);
-    } else {
+    } else if (textChannel) {
       state.textChannel = textChannel;
     }
     return state;

@@ -16,7 +16,7 @@
 1. Create an application named **SoundGuildManager** in the [Discord Developer Portal](https://discord.com/developers/applications), then add a bot.
 2. Copy the bot token and application ID into `.env` (use `.env.example` as the template).
 3. In **OAuth2 → URL Generator**, select `bot` and `applications.commands`.
-4. Give the bot `View Channels`, `Send Messages`, `Connect`, and `Speak`, then use the generated URL to invite it.
+4. Give the bot `View Channels`, `Send Messages`, `Embed Links`, `Connect`, and `Speak`, then use the generated URL to invite it.
 5. For instant command registration during development, put your server ID in `DISCORD_GUILD_ID`. Global commands can take time to appear.
 
 To rename an existing bot, open its application in the Developer Portal, select **Bot**, change its username to **SoundGuildManager**, and save. You can also update the application name under **General Information**.
